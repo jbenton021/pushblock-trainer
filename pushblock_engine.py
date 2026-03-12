@@ -3,10 +3,12 @@ Core pushblock logic: tracks button presses within the 14-frame window,
 determines Dark Force conflicts, and resolves pushblock probability.
 
 Mechanics (accurate to Vampire Savior):
-- Every button press counts toward the total, including repeated presses
-  of the same button. 6 presses of LP = 6 presses = 100% pushblock.
+- The game polls inputs once per frame. Regardless of how many buttons
+  are pressed on a given frame, it counts as ONE press toward pushblock.
+  Example: LP+MP+HP on frame 0 = 1 press. LP on frame 0, MP on frame 3 = 2 presses.
 - Dark Force only triggers if two buttons of the same strength
   (LP+LK, MP+MK, HP+HK) are pressed on the EXACT SAME FRAME.
+- 6 presses across 6 different frames = 100% pushblock.
 """
 
 import random
@@ -17,15 +19,16 @@ class PushblockResult:
     """Stores the result of a single pushblock attempt."""
 
     def __init__(self):
-        self.buttons_pressed = []       # List of game button indices in press order (with repeats)
-        self.total_presses = 0          # Total number of presses (including repeats)
+        self.buttons_pressed = []       # List of game button indices in press order (all raw presses)
+        self.frames_with_input = 0      # Number of distinct frames that had at least one press
         self.dark_force_triggered = False
         self.dark_force_type = None     # "Light", "Medium", or "Heavy"
         self.pushblock_probability = 0.0
         self.pushblock_success = False
         self.roll_value = None          # The random roll (for display)
         self.frames_used = 0            # How many frames the window lasted
-        self.press_timeline = []        # List of (frame_number, button_index)
+        self.press_timeline = []        # List of (frame_number, button_index) — all raw presses
+        self.presses_by_frame = {}      # {frame_number: set of button_indices}
 
     def summary(self):
         if self.dark_force_triggered:
@@ -37,8 +40,8 @@ class PushblockResult:
             )
         else:
             pct = int(self.pushblock_probability * 100)
-            if self.total_presses < 3:
-                return f"NOT ENOUGH PRESSES ({self.total_presses}/6, {pct}%)"
+            if self.frames_with_input < 3:
+                return f"NOT ENOUGH INPUTS ({self.frames_with_input}/6, {pct}%)"
             else:
                 return (
                     f"PUSHBLOCK FAILED ({pct}% chance, "
@@ -57,8 +60,8 @@ class PushblockEngine:
     def __init__(self):
         self.state = self.STATE_IDLE
         self.frame_counter = 0
-        self.buttons_pressed_order = []   # Every press in order (with repeats)
-        self.press_timeline = []          # (frame, button_index) for every press
+        self.buttons_pressed_order = []   # Every raw press in order (for display)
+        self.press_timeline = []          # (frame, button_index) for every raw press
         self.presses_by_frame = {}        # {frame_number: set of button_indices pressed that frame}
         self.current_result = None
         self.result_display_timer = 0
@@ -80,7 +83,6 @@ class PushblockEngine:
         self.buttons_pressed_order.append(button_index)
         self.press_timeline.append((self.frame_counter, button_index))
 
-        # Track which buttons were pressed on this specific frame
         if self.frame_counter not in self.presses_by_frame:
             self.presses_by_frame[self.frame_counter] = set()
         self.presses_by_frame[self.frame_counter].add(button_index)
@@ -93,6 +95,14 @@ class PushblockEngine:
                 self._resolve()
         elif self.state == self.STATE_RESULT:
             self.result_display_timer += 1
+
+    def _get_frames_with_input(self):
+        """
+        Count the number of distinct frames that had at least one button press.
+        This is the effective 'press count' for pushblock probability.
+        Multiple buttons on the same frame = 1 input.
+        """
+        return len(self.presses_by_frame)
 
     def _check_dark_force(self):
         """
@@ -111,9 +121,12 @@ class PushblockEngine:
         """Resolve the pushblock attempt at end of window."""
         result = PushblockResult()
         result.buttons_pressed = list(self.buttons_pressed_order)
-        result.total_presses = len(self.buttons_pressed_order)
+        result.frames_with_input = self._get_frames_with_input()
         result.frames_used = self.frame_counter
         result.press_timeline = list(self.press_timeline)
+        result.presses_by_frame = {
+            f: set(btns) for f, btns in self.presses_by_frame.items()
+        }
 
         # Check for Dark Force: same-strength pair on the same frame
         df_triggered, df_type = self._check_dark_force()
@@ -124,8 +137,8 @@ class PushblockEngine:
             result.pushblock_probability = 0.0
             result.pushblock_success = False
         else:
-            # Total presses (including repeats) determine probability
-            count = min(result.total_presses, 6)
+            # Frames with input determine probability (capped at 6)
+            count = min(result.frames_with_input, 6)
             result.pushblock_probability = PUSHBLOCK_PROBABILITY.get(count, 0.0)
 
             # Roll
@@ -156,16 +169,16 @@ class PushblockEngine:
     def get_current_frame(self):
         return self.frame_counter
 
-    def get_total_presses(self):
-        """Return total number of presses (including repeats)."""
-        return len(self.buttons_pressed_order)
+    def get_frames_with_input(self):
+        """Return the number of distinct frames that have input so far."""
+        return self._get_frames_with_input()
 
     def get_active_buttons(self):
         """Return set of distinct button indices pressed in current attempt."""
         return set(self.buttons_pressed_order)
 
     def get_presses_by_frame(self):
-        """Return the frame->buttons mapping for Dark Force visualization."""
+        """Return the frame->buttons mapping for visualization."""
         return self.presses_by_frame
 
     def has_dark_force_conflict(self):

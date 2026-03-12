@@ -126,17 +126,6 @@ class UIRenderer:
                 ),
             )
 
-            # Show per-button press count during active window
-            if engine.get_state() == PushblockEngine.STATE_ACTIVE and i in active_buttons:
-                count = sum(
-                    1 for b in engine.buttons_pressed_order if b == i
-                )
-                if count > 1:
-                    count_label = self.font_tiny.render(
-                        f"x{count}", True, COLOR_WARNING
-                    )
-                    self.screen.blit(count_label, (x + btn_w - 22, y + 2))
-
     def _draw_timer_bar(self, engine: PushblockEngine):
         """Draw the 14-frame timer bar."""
         bar_x = 100
@@ -178,9 +167,12 @@ class UIRenderer:
                 (bar_x + bar_w // 2 - frame_txt.get_width() // 2, bar_y + 5),
             )
 
-            # Draw tick marks for each press on the timeline
-            for frame, btn_idx in engine.press_timeline:
-                tick_x = bar_x + int((frame / FRAME_WINDOW) * bar_w)
+            # Draw tick marks for each frame that has input
+            # Group simultaneous presses into one tick per frame
+            presses_by_frame = engine.get_presses_by_frame()
+            for frame_num in sorted(presses_by_frame.keys()):
+                btns_on_frame = presses_by_frame[frame_num]
+                tick_x = bar_x + int((frame_num / FRAME_WINDOW) * bar_w)
                 pygame.draw.line(
                     self.screen,
                     COLOR_WARNING,
@@ -188,8 +180,12 @@ class UIRenderer:
                     (tick_x, bar_y),
                     2,
                 )
+                # Show all buttons pressed on this frame
+                frame_label = "+".join(
+                    BUTTON_SHORT[b] for b in sorted(btns_on_frame)
+                )
                 tick_label = self.font_tiny.render(
-                    BUTTON_SHORT[btn_idx], True, COLOR_WARNING
+                    frame_label, True, COLOR_WARNING
                 )
                 self.screen.blit(
                     tick_label,
@@ -223,12 +219,12 @@ class UIRenderer:
         """Draw current press count and probability during active window."""
         y = 280
         if engine.get_state() == PushblockEngine.STATE_ACTIVE:
-            total = engine.get_total_presses()
-            capped = min(total, 6)
+            frames_with_input = engine.get_frames_with_input()
+            capped = min(frames_with_input, 6)
             prob = PUSHBLOCK_PROBABILITY.get(capped, 0.0)
 
             count_txt = self.font_medium.render(
-                f"Total presses: {total}  (effective: {capped}/6)",
+                f"Input frames: {frames_with_input}  (effective: {capped}/6)",
                 True,
                 COLOR_TEXT,
             )
@@ -272,7 +268,7 @@ class UIRenderer:
         y += 22
 
         current_count = (
-            min(engine.get_total_presses(), 6)
+            min(engine.get_frames_with_input(), 6)
             if engine.get_state() == PushblockEngine.STATE_ACTIVE
             else -1
         )
@@ -289,15 +285,23 @@ class UIRenderer:
                 )
 
             txt = self.font_small.render(
-                f"{presses} press{'es' if presses != 1 else ' ':2s} = {int(prob * 100):3d}%",
+                f"{presses} input{'s' if presses != 1 else ' ':2s} = {int(prob * 100):3d}%",
                 True,
                 color,
             )
             self.screen.blit(txt, (x, y))
             y += 20
 
+        # Explanation
+        y += 5
+        note = self.font_tiny.render(
+            "1 input = 1 frame with any button(s)", True, COLOR_TEXT_DIM
+        )
+        self.screen.blit(note, (x, y))
+        y += 16
+
         # Dark Force note
-        y += 8
+        y += 4
         df_note = self.font_tiny.render(
             "DARK FORCE (same-frame only):", True, COLOR_DARKFORCE
         )
@@ -321,8 +325,8 @@ class UIRenderer:
         cx = SCREEN_WIDTH // 2 + 40
 
         # Result box
-        box_w = 420
-        box_h = 180
+        box_w = 450
+        box_h = 195
         box_x = cx - box_w // 2
 
         if engine.get_state() == PushblockEngine.STATE_RESULT:
@@ -362,13 +366,18 @@ class UIRenderer:
 
             # Details
             detail_y = y + 50
-            buttons_str = " ".join(
-                BUTTON_SHORT[b] for b in result.buttons_pressed
-            )
+
+            # Show frame-by-frame breakdown
+            frame_strs = []
+            for frame_num in sorted(result.presses_by_frame.keys()):
+                btns = result.presses_by_frame[frame_num]
+                btn_label = "+".join(BUTTON_SHORT[b] for b in sorted(btns))
+                frame_strs.append(f"f{frame_num}:{btn_label}")
+            timeline_str = "  ".join(frame_strs)
 
             details = [
-                f"Presses: {buttons_str}",
-                f"Total: {result.total_presses} press(es)",
+                f"Timeline: {timeline_str}",
+                f"Input frames: {result.frames_with_input}  (1 frame = 1 input)",
                 f"Probability: {int(result.pushblock_probability * 100)}%",
             ]
             if result.dark_force_triggered:
@@ -417,7 +426,7 @@ class UIRenderer:
     def _draw_history(self, engine: PushblockEngine):
         """Draw recent attempt history."""
         x = 20
-        y = 540
+        y = 555
         header = self.font_small.render("HISTORY (last 8)", True, COLOR_ACCENT)
         self.screen.blit(header, (x, y))
         y += 22
@@ -434,12 +443,17 @@ class UIRenderer:
                 icon = "XX"
                 color = COLOR_FAILURE
 
-            buttons_str = ",".join(
-                BUTTON_SHORT[b] for b in result.buttons_pressed
-            )
+            # Show frame-by-frame summary
+            frame_strs = []
+            for frame_num in sorted(result.presses_by_frame.keys()):
+                btns = result.presses_by_frame[frame_num]
+                btn_label = "+".join(BUTTON_SHORT[b] for b in sorted(btns))
+                frame_strs.append(btn_label)
+            inputs_str = ", ".join(frame_strs)
+
             line = (
-                f"[{icon}] {result.total_presses}prs "
-                f"{int(result.pushblock_probability * 100):3d}% | {buttons_str}"
+                f"[{icon}] {result.frames_with_input}inp "
+                f"{int(result.pushblock_probability * 100):3d}% | {inputs_str}"
             )
             txt = self.font_tiny.render(
                 line, True, color if i == 0 else COLOR_TEXT_DIM
@@ -451,7 +465,7 @@ class UIRenderer:
         """Draw session statistics."""
         stats = engine.get_stats()
         x = SCREEN_WIDTH - 250
-        y = 540
+        y = 555
 
         header = self.font_small.render("SESSION STATS", True, COLOR_ACCENT)
         self.screen.blit(header, (x, y))
